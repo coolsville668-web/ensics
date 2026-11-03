@@ -109,6 +109,7 @@ Device: Examiner VM
 PLUGGINS:  (netstat, pslist, psaux, bash_hash, lsmod, check_modules)
 
 
+PROCESSES AND COMMAND-LINE ARGUMENTS.
 
 linux_pslist
 	
