@@ -1,0 +1,325 @@
+ACQUISITION 
+	1. Shared folder creation
+
+	2. sudo mkdir -p /media/testShare
+
+	3. sudo mount -t vboxsf testShare /media/testShare
+
+
+	4. Sudo chmod 777 /media/testShare
+  – This grants administrative access to the particular folder to avoid permission errors
+	
+        5. sudo usermod -aG vboxsf $USER
+	 to grant your regular Linux user account standard read and write access to VirtualBox shared folders     
+         without needing to prefix every command with sudo.
+	
+        6. Sudo nano /etc/apt/sources.list
+  
+        deb http://archive.debian.org/debian   jessie main contrib non-free
+        deb-src http://archive.debian.org/debian   jessie main contrib non-free
+    
+        deb http://archive. debian.org/debian-security/  jessie/updates main contrib non-free
+        deb-src  http://archive.debian.org/debian-security / jessie/updates main contrib non-free
+
+	7. sudo apt-get update -o Acquire::Check-Valid-Until=false
+	 
+        Downloads the latest catalog of available software from the archive.debian.org servers while ignoring the fact that Debian Jessie was retired years ago.
+	   apt-get update: Re-synchronizes the package index files from the web addresses listed in         /etc/apt/sources.list. It does not install or update software; it simply downloads the "menu" of available packages.
+	 
+       8. sudo apt-get install --force-yes  -y build-essential linux-headers-$(uname  -r) git zip
+	- Downloads and installs all software tools and kernel files required to compile the LiME kernel module and build a Volatility memory profile.
+	
+       9. git clone https://github.com/504ensicsLabs/LiME.git
+	Downloads a complete copy of the LiME (Linux Memory Extractor) source code repository from GitHub onto your Target VM's local storage.
+	Running this creates a brand new directory named LiME/ inside your current working folder (usually ~ or /home/vagrant/).
+	
+
+      10. cd LiME/src
+	Enters the src (source) folder inside the newly created LiME folder.
+	The Makefile (the script that tells Linux how to compile the code) is located inside LiME/src/, not in the main LiME/ root folder. If you skip this step and run make inside LiME/, the system will crash with the common exam error:
+	make: *** No targets specified and no makefile found. Stop.
+
+	11.  Make
+	Converts the human-readable C source code into a binary Loadable Kernel Module (.ko file) that the Linux kernel can execute.
+	A build automation tool. When you type make, it automatically looks for a file named Makefile in your current directory and reads its build instructions.
+	 
+        12. sudo  insmod lime-$(uname -r).ko path=/media/testShare/target_ram.lime format=lime         
+	Loads the compiled LiME kernel module into Kernel Space (Ring 0) and immediately starts extracting physical RAM directly to your shared folder.
+	
+
+        13.sudo   rmmod   lime
+	Safely unloads the LiME kernel module from memory once acquisition completes.
+	 
+
+       14. ls -lh   /media/testShare/target_ram.lime
+	Displays the file details and size of the captured .lime file in human-readable units
+	
+
+        15. sha256sum /media/testShare/target_ram.lime > /media/testShare/ram_hash.sha256
+         Establishes forensic integrity and chain of custody.
+
+	 16. cat   /media/testShare/ram_hash.sha256
+	What it does: Prints the content of ram_hash.sha256 to your terminal screen.
+
+
+          
+        VOLATILITY PROFILE CREATION:
+	
+	17.  cd  ~  &&  git  clone  https://github.com/volatilityfoundation/volatility.git
+	
+	Why it's necessary: Provides the source code and build tools (volatility/tools/linux) needed to generate the Linux profile header structures.
+	 
+
+        18. cd   volatility/tools/linux
+	What it does: Navigates into the Linux profile creation tools directory inside Volatility.
+	Why it's necessary: The Makefile and C source file (module.c) required to compile module.dwarf are located       inside this subfolder.
+	  
+
+         19. Make
+	What it does: Compiles module.c against your Target VM's running kernel headers (linux-headers-$(uname -r)).
+	Resulting File: Generates module.dwarf.
+	Why it's necessary: module.dwarf contains Debugging With Arbitrary Record Format (DWARF) data, mapping the byte offsets and structural layouts of kernel data structures for Volatility.
+	20. zip   $(lsb_release -i -s)_$(uname -r)_profile.zip   ./module.dwarf   /boot/System.map-$(uname -r)
+	•  What it does: Packages module.dwarf and your system's kernel symbol map (/boot/System.map-...) into a single compressed .zip archive.
+	•  Why it's necessary: Volatility requires both files bundled together in a .zip archive to interpret raw Linux memory addresses:
+	
+
+        module.dwarf: Defines what data structures look like.
+	System.map: Defines where functions and symbols sit in memory.
+	
+
+         21. cp *_profile.zip  /media/testShare/
+	
+
+ANALYSIS
+Device: Examiner VM
+
+
+	1. cp   /media/testShare/*_profile.zip   ~/volatility/volatility/plugins/overlays/linux/
+	What it does: Copies the custom profile .zip file from /media/testShare/ into Volatility's Linux overlay  plugin directory.
+
+	Why it's necessary: Volatility automatically scans the plugins/overlays/linux/ folder on startup to detect custom Linux profiles.
+
+	 2. volatility --info | grep Linux
+	What it does: Scans Volatility's profile database and filters the terminal output to display detected Linux profiles.
+	
+	Why it's necessary: Identifies the exact string name Volatility assigned to your custom profile (e.g., LinuxDebian_3_16_0-4-amd64_profilex64), which is required for the analysis command.
+
+
+PLUGGINS:  (netstat, pslist, psaux, bash_hash, lsmod, check_modules)
+
+
+
+linux_pslist
+	
+  3. volatility -f  /media/testShare/target_ram.lime   --profile=LinuxDebian_4_9_0-12-amd64_profilex64 linux_pslist 
+
+	What it does: Runs Volatility against target_ram.lime using your custom kernel profile and executes the linux_pslist plugin.
+	Resulting Output: Parses physical RAM and prints a table of all active processes, Process IDs (PIDs), Parent PIDs (PPIDs), and start times present on the Target VM at the moment of capture.
+	Enumerating active task_struct objects in the kernel's doubly-linked process list.
+	task_struct - The core kernel C data structure storing PID, UID/GID, process relations, file descriptors, and memory layout references.
+	Limitation: Fails to show processes that unlinked themselves from the double-linked list to hide.
+  
+
+Linux_pstree
+
+	4. volatility -f /media/testShare/target_ram.lime  --profile=LinuxDebian_4_9_0-12-amd64_profilex64 linux_pstree
+
+	Reconstructing parent-to-child process tree hierarchies (PPID to PID mapping).
+	How it detects malicious activity: Highlights reparenting anomalies or suspicious execution chains (e.g., a web server apache2 or nginx spawning /bin/bash, or a system process running under an unexpected parent). 
+
+
+linux_psaux
+	 5. volatility -f  /media/testShare/target_ram.lime   --profile=LinuxDebian_4_9_0-12-amd64_profilex64 linux_psaux
+	
+What it does: Extracts command-line arguments (argv) passed to each process upon launch. 
+	How it detects malicious activity: Reveals full command execution strings, inline malicious flags, reverse shell commands, or binaries executed out of temporary directories (e.g., /tmp/malware or /dev/shm/.run)
+	volatility -f  /media/testShare/target_ram.lime   --profile=LinuxDebian_4_9_0-12-amd64_profilex64 linux_psaux | grep wget   - CAN BE USED TO KNOW WEB ADDRESSES TYPED IN COMMAND LINE.
+	
+
+      6. linux_bash_hash
+
+	Shows command history USER typed into their terminal prompt, even commands which finished running.
+
+	7. linux_psenv
+	What it does: Extracts environment variables (PATH, PWD, USER, LD_PRELOAD) associated with each process.
+	How it detects malicious activity: Flags malicious library preloading (LD_PRELOAD=/tmp/hook.so) or altered search paths (PATH) designed to intercept legitimate system commands. 
+
+
+Hidden Execution & Memory Injection Scans.
+	
+
+        8.  linux_psxview
+
+	What it does: Cross-references process visibility across multiple independent kernel structures (pslist, pid_hash, kmem_cache, and parent execution chains).
+	
+	How it detects malicious activity: Detects "ghost" processes. If a process shows False in pslist and pid_hash but True in kmem_cache, an attacker unlinked the process from standard API lists to hide it from process managers.
+	
+
+         9. linux_malfind
+•  What it does: Scans Virtual Memory Areas (vm_area_struct) of all processes for unbacked anonymous memory regions with Read-Write-Execute permissions. 
+•  How it detects malicious activity: Flags code injection and shellcode execution. Legitimate Linux applications strictly adhere to W⊕X (Write XOR Execute) and do not allocate unbacked (vm_file == NULL) memory that is simultaneously writable and executable (RWX)
+	
+
+
+          10. linux_process_hollow
+	What it does: Compares the in-memory execution image of a process against its original binary file on disk. 
+	How it detects malicious activity: Detects Process Hollowing. If the code bytes in RAM drastically differ from the disk binary baseline, an attacker injected malicious code inside the memory space of a legitimate binary.
+	 
+
+           11. linux_ldrmodules
+	What it does: Compares memory-mapped dynamic shared libraries (mm_struct) against the dynamic loader's tracking list (lib_list). 
+	How it detects malicious activity: Detects stealthy shared object (.so) libraries manually loaded into memory without registering through the standard dynamic linker. 
+	Compares memory helper files against the dynamic loader's official list. It finds secret code modules (.so files) loaded off the record. 
+
+
+
+Network & File Resource Mapping
+	 
+
+
+             12. linux_lsof
+
+
+	What it does: Lists all open File Descriptors (FDs) held by each active process, including opened files, pipes, devices, and socket numbers. 
+	How it detects malicious activity: Pinpoints which specific process holds an open handle to hidden files, raw block devices, or active communication sockets. 
+	
+
+
+          13. linux_netstat
+
+
+	What it does: Reconstructs active TCP/UDP network sockets and internal UNIX domain sockets from kernel memory. 
+	How it detects malicious activity: Discovers unauthorized listening backdoors (e.g., LISTEN on port 4444) or active outbound Command & Control (C2) connections (ESTABLISHED) to external untrusted IP addresses.
+
+
+
+	   14. linux_ifconfig & linux_arp
+
+
+	What it does: ifconfig checks network interface flags; arp dumps the Address Resolution Protocol neighbor cache. 
+	How it detects malicious activity: ifconfig flags cards running in promiscuous mode (IFF_PROMISC used for packet sniffing). arp detects altered IP-to-MAC address mappings indicative of ARP spoofing or lateral movement. 
+
+Kernel Rootkit & Handler Hook Detection:
+
+	  15.  linux_hidden_modules / linux_check_modules
+
+	What it does: Scans kernel physical memory for Loadable Kernel Modules (.ko) and compares them against /proc/modules and sysfs. 
+	How it detects malicious activity: Uncovers hidden kernel rootkits that unlinked their module structure from the main kernel list (list_del_init) to hide from commands like lsmod.
+
+
+	16. linux_check_creds
+	
+          What it does: Inspects the security credential structures (cred) of all running processes.
+	How it detects malicious activity: Identifies privilege escalation rootkits where a non-root process has been granted root privileges (UID 0) or shares credential pointers with privileged kernel structures.
+	 
+
+           17.  linux_check_fop / linux_check_tty / linux_netfilter
+	What it does: Checks kernel subsystem operation tables (File Operations, TTY drivers, Netfilter hooks) for function pointers.
+	How it detects malicious activity: Detects kernel hooking. If a function pointer inside an operation table points to an address outside core kernel memory or legitimate module bounds, a rootkit has hijacked system calls or event handlers.
+
+
+
+Data Extraction:
+
+	  18.  linux_moddump & linux_find_file
+
+	What it does: linux_moddump extracts kernel modules from RAM; linux_find_file recovers specific files from the VFS page cache. 
+	linux_find_file example: After running a linux_lsof you get the exact file descriptor and use this command 
+ volatility -f cw1_infected_ubuntu.dump --profile=LinuxUbuntu_3_13_0-170-generic_profilex64 linux_find_file -F  /home/rootkit/script.bash -O script.bash
+
+Then cat script.bash this will print the exact command an attacker used.
+	How it detects malicious activity: Allows analysts to carve the suspicious binary, shellcode, or LKM directly out of RAM to run static analysis, YARA scanning, or disassembly in Ghidra/IDA Pro
+	 
+
+           19. Linux_lsmod
+	The lsmod (List Modules) command displays all currently loaded Loadable Kernel Modules (LKMs) in the Linux kernel.
+
+
+
+
+
+COMPARISON CLEAN & DIRTY DUMP.
+
+
+
+# 1. Run plugin on clean dump and save output
+Volatility  -f  clean.dump  --profile=LinuxDebian_3_16_0-9-amd64_profilex64 linux_pslist  >   clean_pslist.txt
+
+# 2. Run plugin on dirty dump and save output
+volatility -f dirty.dump --profile=LinuxDebian_3_16_0-9-amd64_profilex64 linux_pslist   >   dirty_pslist.txt
+
+# 3. Compare the outputs side-by-side
+diff -u clean_pslist.txt dirty_pslist.txt
+diff -u clean_pslist.txt dirty_pslist.txt | grep '^+[^+]'
+
+CLEAN DUMP (-)
+DIRTY DUMP (+)
+
+
+
+
+Network Protocol & Layer Breakdown
+
+
+
+Network communications operate within Layer 4 (Transport Layer) of the OSI model, which dictates how data is packaged, transmitted, and verified across a network.
+
+
+1. TCP (Transmission Control Protocol)
+
+Acronym Definition
+	Transmission Control Protocol
+Core Mechanism & Features
+	Connection-Oriented: A formal two-way connection must be established between the sender and receiver before any real data can be transmitted.
+
+	The 3-Way Handshake:
+	SYN (Synchronize): Client sends a request packet with an initial sequence number to the server.
+	SYN-ACK (Synchronize-Acknowledge): Server responds confirming receipt and sends its own sequence number.
+	ACK (Acknowledge): Client confirms receipt. The connection is now open.
+	
+
+Reliable & Ordered Delivery: Every packet is acknowledged (ACK). If a packet is lost in transit, TCP automatically retransmits it. Packets arriving out of order are reassembled into the exact sequence they were sent.
+
+
+How TCP Appears in Volatility (linux_netstat)
+
+TCP connections maintain distinct state tracking within kernel socket memory structures: 
+	LISTEN: The local service is standing by, waiting for an incoming remote connection request (e.g., SSH daemon listening on port 22). 
+	ESTABLISHED: An active, connected channel between the local machine and a remote endpoint (e.g., active C2 session or reverse shell). 
+	CLOSE_WAIT / TIME_WAIT: Connection termination phases where sockets clean up resources.
+
+
+
+2. UDP (User Datagram Protocol)
+
+
+Acronym Definition
+	User Datagram Protocol
+
+Core Mechanism & Features
+	Stateless / Connectionless: No preliminary handshake takes place before transmitting data. The sender simply packages the payload into a datagram and transmits it directly ("fire and forget").
+
+	Unreliable / Low Overhead: UDP does not track whether packets reach their destination, does not request retransmissions for dropped packets, and does not guarantee packet arrival order.
+
+	High Speed: Eliminating the handshake and delivery receipts makes UDP significantly faster and lighter than TCP, making it ideal for real-time services like streaming, DNS lookups, and VoIP.
+How UDP Appears in Volatility (linux_netstat)
+
+Because UDP does not establish a persistent connection state, kernel socket entries display differently: 
+	No Connection States: Columns for connection states (ESTABLISHED, LISTEN) will appear blank or show 0. 
+	Stateless Datagram Binding: Displays local IP and port assignments waiting to accept incoming datagrams (e.g., dhclient listening on UDP port 68 or rpcbind on port 111). 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
