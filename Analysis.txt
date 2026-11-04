@@ -1,0 +1,333 @@
+================================================================================
+
+                    LINUX MEMORY FORENSICS ANALYSIS GUIDE
+
+                 Exam Reference, Plugin Map & Methodology
+
+================================================================================
+
+
+
+--------------------------------------------------------------------------------
+
+1. SCOPE & INVESTIGATION OVERVIEW
+
+--------------------------------------------------------------------------------
+
+Memory forensics extracts volatile artifacts directly from physical RAM to 
+
+reconstruct adversary actions, trace privilege escalation paths, uncover 
+
+kernel rootkits, and recover unlinked payloads.
+
+
+
+* Target Image:    cw1_infected_ubuntu.dump
+
+* Baseline Image:  clean_ubuntu.lime
+
+* Profile:         LinuxUbuntu_3_13_0-170-generic_profilex64
+
+* Key Focus:       Plugin purpose, process lineage, file paths, socket correlation,
+
+                   and deep-dive PID analysis without redundant CLI flags.
+
+
+
+
+
+--------------------------------------------------------------------------------
+
+2. VOLATILITY PLUGINS: PURPOSE, PATHS & SOCKET ANALYSIS
+
+--------------------------------------------------------------------------------
+
+
+
+[A] PROCESS LINEAGE & CREDENTIAL TRANSITIONS
+
+* Plugins: linux_pslist, linux_pstree, linux_psaux
+
+* Purpose: Renders running process trees, parent-child relationships, and full
+
+  execution command-line arguments.
+
+* Comparative/Differential Findings:
+
+  - Entry Point: sshd (PID 2090/2161) established via opsuser (UID 1000).
+
+  - Reconnaissance: /sbin/ifconfig executed under low privileges.
+
+  - Privilege Elevation: su (PID 8494) transitioned execution to an elevated
+
+    root shell bash (PID 10296, UID 0).
+
+  - Execution Lineage:
+
+    sshd (PID 1241, UID 0)
+
+    └── sshd (PID 2090 / 2161, UID 1000 [opsuser])
+
+        └── bash (PID 2162, UID 1000 [opsuser])
+
+            └── su (PID 8494, UID 1000 -> 0)
+
+                └── bash (PID 10296, UID 0 [root])
+
+
+
+
+
+[B] UNLINKED & SHORT-LIVED PROCESS DETECTION
+
+* Plugin: linux_psxview
+
+* Purpose: Cross-references processes across multiple kernel memory structures
+
+  (pslist, psscan, tasks, pid_hash) to spot rootkit evasion or terminated tasks.
+
+* Key Findings:
+
+  - Active Shell & Storm: bash (PID 10296) shows True across pslist and tasks.
+
+  - Terminated/Short-Lived Storm: Multiple wget instances (PIDs 10468, 10475)
+
+    and sleep commands (PIDs 10569, 10574) show pslist = False and tasks = True.
+
+  - Significance: Proves a continuous execution loop rapidly spawning and
+
+    destroying processes.
+
+
+
+
+
+[C] COMMAND HISTORY & PROCESS ENVIRONMENT METADATA
+
+* Plugins: linux_bash_hash, linux_envars
+
+* Purpose: linux_bash_hash recovers cached shell command hits; linux_envars
+
+  extracts environment variables ("backpack" metadata).
+
+* Key File Paths & Environment Findings:
+
+  - Working Directory: PWD=/vagrant/Diamorphine (Kernel rootkit build directory).
+
+  - Remote Connection: SSH_CLIENT=10.0.2.2 45078 22 (Attacker source IP 10.0.2.2).
+
+  - Anti-Forensic Evasion: HISTFILE=/dev/null & HISTSIZE=0 in PID 10247/10277
+
+    (Disables terminal session logging).
+
+  - Bot Directory: PWD=/home/bot/irc-bash-client (Path for IRC bot client).
+
+  - Target Script Path: PWD=/home/rootkit (Rootkit user workspace).
+
+
+
+
+
+[D] KERNEL INTEGRITY & ROOTKIT DETECTION
+
+* Plugins: linux_lsmod, linux_check_modules
+
+* Purpose: linux_lsmod lists officially registered modules; linux_check_modules
+
+  scans sysfs kobjects for hidden LKMs.
+
+* Key Driver Findings:
+
+  - Module Name: diamorphine
+
+  - Memory Base Address: 0xffffffffa016a000
+
+  - Forensic Impact: diamorphine unlinked itself from /proc/modules to evade
+
+    linux_lsmod. Detected via linux_check_modules.
+
+
+
+
+
+[E] NETWORK SOCKET & C2 INFRASTRUCTURE CORRELATION
+
+* Plugin: linux_netstat
+
+* Purpose: Maps open listening ports, TCP/UDP sockets, and remote IPs to PIDs.
+
+* Key Network Sockets & Targets:
+
+  - Inbound SSH: 0.0.0.0:22 (sshd, PID 1241) connected from 10.0.2.2:45078.
+
+  - Command & Control (C2): 0.0.0.0:6665-6669 (ircd-hybrid, PID 6826).
+
+  - Internal Bot Binding: Loopback 127.0.0.1:37765 -> 127.0.0.1:6667 (bash, PID 10190).
+
+  - DNS Resolution: 10.0.2.15:<ephemeral> -> 10.0.2.3:53 (UDP Port 53).
+
+  - Outbound HTTP/HTTPS Targets (Layer 7 Flood via wget):
+
+    * bbc.com:        10.0.2.15 -> 212.58.233.247:443
+
+    * google.com:     10.0.2.15 -> 142.250.178.14:80
+
+    * twitter.com:    10.0.2.15 -> 104.244.42.1:80 / 443
+
+    * facebook.com:   10.0.2.15 -> 151.101.192.81:443
+
+
+
+
+
+[F] FILE DESCRIPTOR RECOVERY & PAYLOAD EXTRACTION
+
+* Plugins: linux_lsof, linux_find_file
+
+* Purpose: Identifies open files attached to process IDs and extracts them.
+
+* File Descriptors for PID 10296 (bash):
+
+  - FD 0, 1, 2:   /dev/pts/0 (Standard interactive SSH terminal)
+
+  - FD 255:       /home/rootkit/script.bash (Active script being executed)
+
+* Payload Finding: Extracting /home/rootkit/script.bash reveals a continuous
+
+  while loop triggering wget requests against external web targets.
+
+
+
+
+
+--------------------------------------------------------------------------------
+
+3. DEEP-DIVE INVESTIGATION OF SELECTED SUSPICIOUS PIDs
+
+--------------------------------------------------------------------------------
+
+
+
+INVESTIGATION 1: PID 10296 (bash - Elevated Attack Loop Shell)
+
+--------------------------------------------------------------
+
+* User Credentials:  UID 0 / GID 0 (root)
+
+* Parent Process:    su (PID 8494)
+
+* Open File Handle:  FD 255 -> /home/rootkit/script.bash
+
+* Associated Paths:  PWD=/home/rootkit
+
+* Network Activity:  Spawns child processes PID 10478–10578 (wget) executing
+
+                     high-velocity outbound GET requests to external web servers.
+
+* Impact:            Functions as the execution node for the Layer 7 HTTP flood.
+
+
+
+
+
+INVESTIGATION 2: PID 6826 (ircd-hybrid - C2 Infrastructure)
+
+------------------------------------------------------------
+
+* User Credentials:  UID 0 (root context via sudo installation)
+
+* Listening Sockets: TCP Ports 6665, 6666, 6667, 6668, 6669 on 0.0.0.0
+
+* Environment Clue:  SUDO_COMMAND=/usr/bin/apt-get -y install mysql-server php5 ircd-hybrid ii
+
+* Connected Clients: Local interactive shells (PID 10190/10191) connected over
+
+                     loopback 127.0.0.1:37765 -> 127.0.0.1:6667.
+
+* Impact:            Acts as the local C2 handler broadcasting attack triggers
+
+                     to bot client shells.
+
+
+
+
+
+--------------------------------------------------------------------------------
+
+4. CORE CONCEPTS & FORENSIC DEFINITIONS
+
+--------------------------------------------------------------------------------
+
+
+
+[1] KERNEL HOOKING DEFINITIONS
+
+* System Call Table Hooking: Modifies entries in sys_call_table (e.g., sys_getdents,
+
+  sys_kill) to redirect kernel operations to rootkit memory (0xffffffffa016a000).
+
+* VFS / File Operations Hooking: Overwrites readdir/iterate function pointers
+
+  in sysfs or procfs to hide files and directories from user utilities.
+
+* Inline Hooking: Modifies instruction prologues of core kernel functions with
+
+  JMP instructions to divert execution.
+
+
+
+[2] PROCESS ENVIRONMENT ("BACKPACK" ANALOGY)
+
+Every process carries environment key-value pairs in memory. These store critical
+
+forensic artifacts including working paths (PWD), user contexts (USER), client
+
+IPs (SSH_CLIENT), and anti-forensic flags (HISTFILE=/dev/null).
+
+
+
+[3] MEMORY ALLOCATOR PROFILE ARTIFACTS
+
+In Linux profiles using the SLUB memory allocator, Volatility 2 may display
+
+pid_hash = False and kmem_cache = False across both clean and malicious processes.
+
+This is a framework profile parsing limitation (SLUB is currently unsupported)
+
+and must not be misidentified as rootkit hiding.
+
+
+
+
+
+--------------------------------------------------------------------------------
+
+5. SYSTEMATIC EXAMINATION METHODOLOGY
+
+--------------------------------------------------------------------------------
+
+1. Establish Differential Baselines: Diff clean (clean_ubuntu.lime) and dirty
+
+   (cw1_infected_ubuntu.dump) process and module lists.
+
+2. Trace Execution Lineage: Identify entry SSH sessions, elevation binaries (su/sudo),
+
+   and child shell PIDs.
+
+3. Audit Process Environments: Check linux_envars for suspicious paths, remote
+
+   IPs, and history suppression flags.
+
+4. Verify Kernel Driver Integrity: Compare linux_lsmod against linux_check_modules
+
+   to detect unlinked LKMs (diamorphine).
+
+5. Map Network Sockets: Identify listening C2 ports and active outbound TCP/UDP
+
+   connections mapped to suspicious parent PIDs.
+
+6. Recover Executable Payloads: Inspect open file handles (linux_lsof) and dump
+
+   executables/scripts (linux_find_file) for static code analysis.
+
+================================================================================
